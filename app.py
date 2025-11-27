@@ -382,53 +382,98 @@ if menu == 'Login':
                 st.error('Invalid or expired OTP.')
 
 # If logged in, show admin panel
-if st.session_state.user and st.session_state.user.get('role') in ('admin','staff'):
+if st.session_state.user and st.session_state.user.get('role') in ('admin', 'staff'):
     user = st.session_state.user
-    st.sidebar.markdown(f"Logged in: {user.get('name')} ({user.get('email')})")
+    st.sidebar.markdown(f"Logged in: **{user.get('name')}** ({user.get('email')})")
 
     if st.sidebar.button('Logout'):
         st.session_state.pop('user', None)
         st.experimental_rerun()
-    tab = st.tabs(['Members','Plans','Assign Plan','Record Visit','Settings','Reports'])
 
-    # Members
+    tab = st.tabs(['Members', 'Plans', 'Assign Plan', 'Record Visit', 'Settings', 'Reports'])
+
+    # ---------------------------------------------------------
+    # MEMBERS TAB
+    # ---------------------------------------------------------
     with tab[0]:
-        st.subheader('Add new member')
-        with st.form('add_member'):
-            parent_name = st.text_input('Parent Name')
-            phone = st.text_input('Phone Number')
-            child_name = st.text_input('Child Name')
-            child_dob = st.date_input('Child DOB')
+        st.subheader('➕ Add New Member')
+
+        with st.form('add_member_form'):
+            parent_name = st.text_input('Parent Name *')
+            phone = st.text_input('Phone Number *')
+            child_name = st.text_input('Child Name *')
+            child_dob = st.date_input('Child Date of Birth')
+
             submitted = st.form_submit_button('Add Member')
+
             if submitted:
                 if not parent_name or not phone or not child_name:
-                    st.error('Please fill required fields')
+                    st.error('⚠️ Please fill all required fields.')
                 else:
-                    membership_no = add_member(parent_name, phone, child_name, child_dob.isoformat())
-                    st.success(f'Added member {membership_no}')
+                    membership_no = add_member(
+                        parent_name,
+                        phone,
+                        child_name,
+                        child_dob.isoformat()
+                    )
+
+                    st.success(f'🎉 Member added successfully! Membership No: **{membership_no}**')
+
+                    # Generate QR Code
                     img = generate_qr_image(membership_no)
                     buf = io.BytesIO()
                     img.save(buf, format='PNG')
+
                     st.image(Image.open(io.BytesIO(buf.getvalue())), width=150)
-                    st.download_button('Download QR', data=buf.getvalue(), file_name=f'{membership_no}.png')
+
+                    st.download_button(
+                        'Download QR Code',
+                        data=buf.getvalue(),
+                        file_name=f'{membership_no}.png'
+                    )
 
         st.markdown('---')
-        st.subheader('Existing members')
+
+        # ---------------------------------------------------------
+        # EXISTING MEMBERS LIST
+        # ---------------------------------------------------------
+        st.subheader('👥 Existing Members')
+
         df_members = get_members_df()
-        st.dataframe(df_members)
-        st.markdown('Edit a member')
-        member_select = st.selectbox('Choose member to edit', df_members['membership_no'].tolist() if not df_members.empty else [])
+        st.dataframe(df_members, use_container_width=True)
+
+        st.markdown('### ✏️ Edit Member Details')
+        member_select = st.selectbox(
+            'Select a member to edit',
+            df_members['membership_no'].tolist() if not df_members.empty else []
+        )
+
         if member_select:
             row = df_members[df_members['membership_no'] == member_select].iloc[0]
-            with st.form('edit_member'):
+
+            with st.form('edit_member_form'):
                 parent_name2 = st.text_input('Parent Name', value=row['parent_name'])
                 phone2 = st.text_input('Phone Number', value=row['phone_number'])
                 child_name2 = st.text_input('Child Name', value=row['child_name'])
-                child_dob2 = st.date_input('Child DOB', value=pd.to_datetime(row['child_dob']).date() if row['child_dob'] else None)
+
+                child_dob2 = st.date_input(
+                    'Child Date of Birth',
+                    value=pd.to_datetime(row['child_dob']).date() if row['child_dob'] else None
+                )
+
                 submitted2 = st.form_submit_button('Update Member')
+
                 if submitted2:
-                    update_member(row['member_id'], parent_name2, phone2, child_name2, child_dob2.isoformat())
-                    st.success('Member updated')
+                    update_member(
+                        row['member_id'],
+                        parent_name2,
+                        phone2,
+                        child_name2,
+                        child_dob2.isoformat()
+                    )
+
+                    st.success('✔️ Member details have been successfully updated.')
+
 
     # Plans
     with tab[1]:
