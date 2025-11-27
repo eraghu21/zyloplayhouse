@@ -333,7 +333,7 @@ init_db()
 
 st.set_page_config(page_title='Membership ERP - Streamlit', layout='wide')
 
-st.markdown(\"\"\"<style>[data-testid='stSidebar'] {background-color: #f0f2f6} h1 {color: #0f4c81}</style>\"\"\", unsafe_allow_html=True)
+st.markdown("<style>[data-testid='stSidebar'] {background-color: #f0f2f6} h1 {color: #0f4c81}</style>", unsafe_allow_html=True)
 st.title('Membership ERP (Streamlit) - Enhanced (OTP + Certificates)')
 
 menu = st.sidebar.selectbox('Go to', ['Home', 'Login', 'Member Lookup', 'Export Data'])
