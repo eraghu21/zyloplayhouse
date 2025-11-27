@@ -557,10 +557,10 @@ if menu == 'Member Lookup':
             else:
                 member_id = row[0]
                 st.subheader(f"{row[4]} ({row[1]})")
-                st.write(f\"Parent: {row[2]}\")
-                st.write(f\"Phone: {row[3]}\")
-                st.write(f\"Child DOB: {row[5]}\")
-                st.write(f\"Member since: {row[6]}\")
+                st.write(f"Parent: {row[2]}")
+                st.write(f"Phone: {row[3]}")
+                st.write(f"Child DOB: {row[5]}")
+                st.write(f"Member since: {row[6]}")
                 # show QR
                 img = generate_qr_image(row[1])
                 buf = io.BytesIO()
