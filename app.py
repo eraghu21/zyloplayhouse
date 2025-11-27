@@ -387,8 +387,10 @@ if st.session_state.user and st.session_state.user.get('role') in ('admin', 'sta
     st.sidebar.markdown(f"Logged in: **{user.get('name')}** ({user.get('email')})")
 
     if st.sidebar.button('Logout'):
-        st.session_state.pop('user', None)
-        st.experimental_rerun()
+    if 'user' in st.session_state:
+        del st.session_state['user']  # safely remove
+    st.experimental_rerun()  # safely rerun the app
+
 
     tab = st.tabs(['Members', 'Plans', 'Assign Plan', 'Record Visit', 'Settings', 'Reports'])
 
