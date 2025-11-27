@@ -572,13 +572,13 @@ if menu == 'Member Lookup':
                     mp_id, plan_type, entitled_visits, start_date, end_date, visits_used, per_visit_hours, price = active
                     visits_pending = entitled_visits - visits_used
                     st.markdown('**Current Plan**')
-                    st.write(f\"Plan: {plan_type}\")
-                    st.write(f\"Entitled Visits: {entitled_visits}\")
-                    st.write(f\"Visits Used: {visits_used}\")
-                    st.write(f\"Visits Pending: {visits_pending}\")
-                    st.write(f\"Validity: {start_date} to {end_date}\")
-                    st.write(f\"Hours per visit: {per_visit_hours}\")
-                    st.write(f\"Price: {price}\")
+                    st.write(f"Plan: {plan_type}")
+                    st.write(f"Entitled Visits: {entitled_visits}")
+                    st.write(f"Visits Used: {visits_used}")
+                    st.write(f"Visits Pending: {visits_pending}")
+                    st.write(f"Validity: {start_date} to {end_date}")
+                    st.write(f"Hours per visit: {per_visit_hours}")
+                    st.write(f"Price: {price}")
                 else:
                     st.info('No active plan')
                 st.markdown('Visit History')
