@@ -1,6 +1,6 @@
 streamlit
+streamlit-aggrid
 pandas
 qrcode
 Pillow
-openpyxl
 reportlab
