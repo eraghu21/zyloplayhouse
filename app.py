@@ -556,7 +556,7 @@ if menu == 'Member Lookup':
                 st.error('Member not found')
             else:
                 member_id = row[0]
-                st.subheader(f\"{row[4]} ({row[1]})\")
+                st.subheader(f"{row[4]} ({row[1]})")
                 st.write(f\"Parent: {row[2]}\")
                 st.write(f\"Phone: {row[3]}\")
                 st.write(f\"Child DOB: {row[5]}\")
