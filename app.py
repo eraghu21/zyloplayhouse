@@ -384,7 +384,8 @@ if menu == 'Login':
 # If logged in, show admin panel
 if st.session_state.user and st.session_state.user.get('role') in ('admin','staff'):
     user = st.session_state.user
-    st.sidebar.markdown(f\"Logged in: {user.get('name')} ({user.get('email')})\")
+    st.sidebar.markdown(f"Logged in: {user.get('name')} ({user.get('email')})")
+
     if st.sidebar.button('Logout'):
         st.session_state.pop('user', None)
         st.experimental_rerun()
