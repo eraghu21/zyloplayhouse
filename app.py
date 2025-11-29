@@ -287,7 +287,7 @@ if menu == 'Members' and st.session_state.get('user'):
                 if st.button('Update Member'):
                     update_member(row['member_id'], parent_new, phone_new, child_new, dob_new.isoformat())
                     st.success('Member updated')
-                    st.experimental_rerun()
+                    st.rerun()
             with col2:
                 st.write('Membership No:')
                 st.code(row['membership_no'])
