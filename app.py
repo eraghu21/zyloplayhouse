@@ -261,7 +261,9 @@ if menu == 'Members' and st.session_state.get('user'):
                 st.error('Please fill required fields')
             else:
                 membership_no = add_member(parent_name, phone, child_name, child_dob.isoformat())
-                st.success(f'Member added: {membership_no}')
+                st.toast("Saved successfully!", icon="✔️")
+
+                #---st.success(f'Member added: {membership_no}')---
                 img = generate_qr_image(membership_no)
                 buf = io.BytesIO(); img.save(buf, format='PNG')
                 st.image(Image.open(io.BytesIO(buf.getvalue())), width=150)
@@ -286,7 +288,8 @@ if menu == 'Members' and st.session_state.get('user'):
                 dob_new = st.date_input('Child DOB', value=pd.to_datetime(row['child_dob']).date(), key='dob_edit')
                 if st.button('Update Member'):
                     update_member(row['member_id'], parent_new, phone_new, child_new, dob_new.isoformat())
-                    st.success('Member updated')
+                    st.toast("Saved successfully!", icon="✔️")
+                    #----st.success('Member updated')----
                     st.rerun()
             with col2:
                 st.write('Membership No:')
@@ -307,7 +310,8 @@ if menu == 'Plans' and st.session_state.get('user'):
         validity_days = st.number_input('Validity (days)', min_value=1, value=30)
         if st.form_submit_button('Add Plan'):
             add_plan(plan_type, int(entitled_visits), int(per_visit_hours), float(price), int(validity_days))
-            st.success('Plan added')
+            st.toast("Saved successfully!", icon="✔️")
+            #----st.success('Plan added')---
     st.markdown('---')
     st.subheader('Existing Plans')
     st.dataframe(get_plans_df())
@@ -327,7 +331,8 @@ if menu == 'Assign Plan' and st.session_state.get('user'):
             plan_id = int(plan_sel.split(' - ')[0])
             member_row = members_df[members_df['membership_no'] == mem].iloc[0]
             assign_plan_to_member(member_row['member_id'], plan_id, start_date.isoformat())
-            st.success('Plan assigned')
+            st.toast("Saved successfully!", icon="✔️")
+            #----st.success('Plan assigned')----
 
 # --- Record Visit ---
 if menu == 'Record Visit' and st.session_state.get('user'):
@@ -342,7 +347,8 @@ if menu == 'Record Visit' and st.session_state.get('user'):
         if st.button('Record Visit'):
             member_row = members_df[members_df['membership_no'] == mem].iloc[0]
             record_visit(member_row['member_id'], int(hours_used), notes)
-            st.success('Visit recorded')
+            st.toast("Saved successfully!", icon="✔️")
+            #----st.success('Visit recorded')---
 
 # --- Reports ---
 if menu == 'Reports' and st.session_state.get('user'):
