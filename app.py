@@ -1,381 +1,423 @@
-# Membership ERP Streamlit app
+"""
+app.py - Membership ERP (Supabase-backed, Full CRM Suite)
+
+Usage:
+- Set these secrets in Streamlit Cloud or environment:
+  SUPABASE_URL
+  SUPABASE_SERVICE_ROLE_KEY
+
+- Deploy: streamlit run app.py
+
+Notes:
+- This file uses the Supabase service_role key for admin operations.
+- For production security, consider anon + RLS and server-side functions.
+- Option D helper functions are included at the bottom to create an admin user and test basic flows.
+"""
+
+import os
 import streamlit as st
-import sqlite3
-from datetime import datetime, timedelta
 import pandas as pd
-import io, os, random
+from datetime import datetime, timedelta
+import io
 import qrcode
 from PIL import Image
-import hashlib, smtplib
-from email.message import EmailMessage
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-
-DB_FILE = 'data/membership_erp.db'
-DEFAULT_ADMIN_EMAIL = 'admin@local'
-DEFAULT_ADMIN_PASSWORD = 'admin123'
-
-# ---------- Helpers ----------
-def get_conn():
-    os.makedirs('data', exist_ok=True)
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
-
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, name TEXT, password_hash TEXT, role TEXT)''')
-    cur.execute('''CREATE TABLE IF NOT EXISTS members (member_id INTEGER PRIMARY KEY AUTOINCREMENT, membership_no TEXT UNIQUE, parent_name TEXT, phone_number TEXT, child_name TEXT, child_dob TEXT, member_since TEXT)''')
-    cur.execute('''CREATE TABLE IF NOT EXISTS plans (plan_id INTEGER PRIMARY KEY AUTOINCREMENT, plan_type TEXT, entitled_visits INTEGER, per_visit_hours INTEGER, price REAL, validity_days INTEGER)''')
-    cur.execute('''CREATE TABLE IF NOT EXISTS member_plan (mp_id INTEGER PRIMARY KEY AUTOINCREMENT, member_id INTEGER, plan_id INTEGER, start_date TEXT, end_date TEXT, visits_used INTEGER DEFAULT 0, FOREIGN KEY(member_id) REFERENCES members(member_id), FOREIGN KEY(plan_id) REFERENCES plans(plan_id))''')
-    cur.execute('''CREATE TABLE IF NOT EXISTS visits (visit_id INTEGER PRIMARY KEY AUTOINCREMENT, member_id INTEGER, visit_date TEXT, hours_used INTEGER, notes TEXT, FOREIGN KEY(member_id) REFERENCES members(member_id))''')
-    cur.execute('''CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)''')
-    conn.commit()
-    cur.execute('SELECT COUNT(*) FROM users')
-    if cur.fetchone()[0] == 0:
-        add_user(DEFAULT_ADMIN_EMAIL, 'Administrator', DEFAULT_ADMIN_PASSWORD, role='admin')
-    conn.close()
-
 import hashlib
 
-def hash_password(password):
-    salt = 'streamlit_salt_v1'
-    return hashlib.sha256((salt + password).encode()).hexdigest()
+from supabase import create_client, Client
 
-# ---------- User functions ----------
-def add_user(email, name, password, role='staff'):
-    conn = get_conn(); cur = conn.cursor()
+# --- Config / Secrets ---
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    st.error("Supabase credentials not found. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in environment or Streamlit secrets.")
+    st.stop()
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+st.set_page_config(page_title="Membership ERP - CRM Suite", layout="wide")
+st.title("Membership ERP — CRM / Business Suite (Supabase)")
+
+# ---------- Utilities ----------
+def hash_password(pw: str) -> str:
+    salt = "erp_salt_v1"
+    return hashlib.sha256((salt + pw).encode()).hexdigest()
+
+def df_from_res(res):
     try:
-        cur.execute('INSERT INTO users (email, name, password_hash, role) VALUES (?, ?, ?, ?)', (email, name, hash_password(password), role))
-        conn.commit()
+        return pd.DataFrame(res.data or [])
     except Exception:
-        pass
-    conn.close()
+        return pd.DataFrame()
 
-def verify_user(email, password):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute('SELECT password_hash, role, name FROM users WHERE email=?', (email,))
-    row = cur.fetchone(); conn.close()
-    if not row: return False, None, None
-    stored, role, name = row
-    return stored == hash_password(password), role, name
+# ---------- Auth / Users (staff) ----------
+def create_staff_user(email, name, password, role="staff"):
+    # Insert only if not exists
+    existing = supabase.table("users").select("user_id").eq("email", email).execute()
+    if existing.data:
+        return False, "User already exists"
+    payload = {"email": email, "name": name, "password_hash": hash_password(password), "role": role}
+    supabase.table("users").insert(payload).execute()
+    return True, "Created"
 
-# ---------- Membership functions ----------
+def verify_staff(email, password):
+    res = supabase.table("users").select("user_id,password_hash,role,name").eq("email", email).execute()
+    if not res.data:
+        return False, None, None
+    rec = res.data[0]
+    return rec["password_hash"] == hash_password(password), rec.get("role"), rec.get("name")
+
+# ---------- Members ----------
 def generate_membership_no():
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM members')
-    count = cur.fetchone()[0] or 0
-    conn.close()
-    return f'ZPHSI-{count+1:04d}'
+    res = supabase.rpc("get_member_count").execute()
+    try:
+        count = int(res.data)
+    except Exception:
+        count = 0
+    return f"ZPHSI-{count+1:04d}"
 
-def add_member(parent_name, phone, child_name, child_dob):
-    conn = get_conn(); cur = conn.cursor()
+def add_member(parent_name, phone, child_name, child_dob, parent_email=None):
     membership_no = generate_membership_no()
-    member_since = datetime.now().date().isoformat()
-    cur.execute('INSERT INTO members (membership_no, parent_name, phone_number, child_name, child_dob, member_since) VALUES (?,?,?,?,?,?)',
-                (membership_no, parent_name, phone, child_name, child_dob, member_since))
-    conn.commit(); conn.close()
+    payload = {
+        "membership_no": membership_no,
+        "parent_name": parent_name,
+        "phone_number": phone,
+        "child_name": child_name,
+        "child_dob": child_dob,
+        "parent_email": parent_email,
+        "member_since": datetime.now().date().isoformat()
+    }
+    supabase.table("members").insert(payload).execute()
     return membership_no
 
-def update_member(member_id, parent_name, phone, child_name, child_dob):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute('UPDATE members SET parent_name=?, phone_number=?, child_name=?, child_dob=? WHERE member_id=?',
-                (parent_name, phone, child_name, child_dob, member_id))
-    conn.commit(); conn.close()
+def get_members_df():
+    res = supabase.table("members").select("*").order("member_id", desc=False).execute()
+    return df_from_res(res)
+
+def update_member(member_id, parent_name, phone, child_name, child_dob, parent_email=None):
+    payload = {
+        "parent_name": parent_name,
+        "phone_number": phone,
+        "child_name": child_name,
+        "child_dob": child_dob,
+        "parent_email": parent_email
+    }
+    supabase.table("members").update(payload).eq("member_id", member_id).execute()
 
 def delete_member(member_id):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute('DELETE FROM members WHERE member_id=?', (member_id,))
-    conn.commit(); conn.close()
+    supabase.table("members").delete().eq("member_id", member_id).execute()
 
-def get_members_df():
-    conn = get_conn()
-    df = pd.read_sql_query('SELECT * FROM members', conn)
-    conn.close()
-    # Ensure membership_no is string to preserve formatting in Excel
-    if 'membership_no' in df.columns:
-        df['membership_no'] = df['membership_no'].astype(str)
-    return df
-
-def get_member_by_id(member_id):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute('SELECT * FROM members WHERE member_id=?', (member_id,))
-    row = cur.fetchone(); conn.close()
-    return row
-
-# ---------- Plans & Assignments ----------
-def add_plan(plan_type, entitled_visits, per_visit_hours, price, validity_days):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute('INSERT INTO plans (plan_type, entitled_visits, per_visit_hours, price, validity_days) VALUES (?,?,?,?,?)',
-                (plan_type, entitled_visits, per_visit_hours, price, validity_days))
-    conn.commit(); conn.close()
+# ---------- Plans ----------
+def add_plan(plan_name, price, duration_days):
+    payload = {"plan_name": plan_name, "price": price, "duration_days": duration_days}
+    supabase.table("plans").insert(payload).execute()
 
 def get_plans_df():
-    conn = get_conn(); df = pd.read_sql_query('SELECT * FROM plans', conn); conn.close(); return df
+    res = supabase.table("plans").select("*").order("plan_id", desc=False).execute()
+    return df_from_res(res)
 
-def assign_plan_to_member(member_id, plan_id, start_date=None):
-    conn = get_conn(); cur = conn.cursor()
+def assign_plan(member_id, plan_id, start_date=None):
     if start_date is None:
-        start_date = datetime.now().date()
-    else:
-        start_date = datetime.fromisoformat(start_date).date()
-    cur.execute('SELECT validity_days FROM plans WHERE plan_id=?', (plan_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close(); return
-    validity_days = row[0]
-    end_date = start_date + timedelta(days=validity_days)
-    cur.execute('INSERT INTO member_plan (member_id, plan_id, start_date, end_date, visits_used) VALUES (?,?,?,?,0)',
-                (member_id, plan_id, start_date.isoformat(), end_date.isoformat()))
-    conn.commit(); conn.close()
+        start_date = datetime.now().date().isoformat()
+    res = supabase.table("plans").select("duration_days").eq("plan_id", plan_id).execute()
+    if not res.data:
+        return
+    validity = res.data[0]["duration_days"]
+    s = pd.to_datetime(start_date).date()
+    e = s + timedelta(days=int(validity))
+    payload = {"member_id": member_id, "plan_id": plan_id, "start_date": s.isoformat(), "end_date": e.isoformat(), "visits_used": 0}
+    supabase.table("member_plan").insert(payload).execute()
 
 def get_member_plans_df():
-    conn = get_conn()
-    df = pd.read_sql_query('''SELECT mp.*, m.membership_no AS membership_no, p.plan_type AS plan_type, p.entitled_visits AS entitled_visits
-                              FROM member_plan mp
-                              JOIN members m ON mp.member_id = m.member_id
-                              JOIN plans p ON mp.plan_id = p.plan_id
-                              ORDER BY mp.mp_id DESC''', conn)
-    conn.close()
-    if 'membership_no' in df.columns: df['membership_no'] = df['membership_no'].astype(str)
-    return df
+    mp = df_from_res(supabase.table("member_plan").select("*").order("mp_id", desc=False).execute())
+    members = df_from_res(supabase.table("members").select("member_id,membership_no,parent_name").execute())
+    plans = df_from_res(supabase.table("plans").select("plan_id,plan_name,duration_days").execute())
+    if not mp.empty:
+        mp = mp.merge(members, on="member_id", how="left").merge(plans, on="plan_id", how="left")
+    return mp
 
-# ---------- Visits and certificates ----------
-def record_visit(member_id, hours_used=1, notes=''):
-    conn = get_conn(); cur = conn.cursor()
-    visit_date = datetime.now().isoformat()
-    cur.execute('INSERT INTO visits (member_id, visit_date, hours_used, notes) VALUES (?,?,?,?)', (member_id, visit_date, hours_used, notes))
-    # increment visits_used for active plan
-    cur.execute('''SELECT mp.mp_id, mp.visits_used, p.entitled_visits, m.membership_no
-                   FROM member_plan mp
-                   JOIN plans p ON mp.plan_id = p.plan_id
-                   JOIN members m ON mp.member_id = m.member_id
-                   WHERE mp.member_id=? AND date(mp.end_date) >= date('now')
-                   ORDER BY mp.mp_id DESC LIMIT 1''', (member_id,))
-    row = cur.fetchone()
-    if row:
-        mp_id, visits_used, entitled_visits, membership_no = row
-        visits_used_new = visits_used + 1
-        cur.execute('UPDATE member_plan SET visits_used = ? WHERE mp_id=?', (visits_used_new, mp_id))
-        # if plan completed, generate certificate
-        if visits_used_new >= entitled_visits:
-            try:
-                pdf_bytes = generate_certificate_pdf(member_id, membership_no)
-                parent_email = get_parent_email_by_member_id(member_id)
-                if parent_email:
-                    send_email_smtp(parent_email, 'Membership Completed - Certificate', 'Congratulations! Attached is your certificate.', attachment_bytes=pdf_bytes, attachment_name=f'certificate_{membership_no}.pdf')
-            except Exception as e:
-                print('Certificate/email failed', e)
-    conn.commit(); conn.close()
+# ---------- Visits ----------
+def record_visit(member_id, hours_used=1, notes=""):
+    payload = {"member_id": member_id, "visit_date": datetime.now().isoformat(), "hours_used": hours_used, "notes": notes}
+    supabase.table("visits").insert(payload).execute()
+    # update member_plan visits_used
+    res = supabase.table("member_plan").select("*").eq("member_id", member_id).gte("end_date", datetime.now().date().isoformat()).order("mp_id", desc=True).limit(1).execute()
+    if res.data:
+        mp = res.data[0]
+        new_visits = (mp.get("visits_used") or 0) + 1
+        supabase.table("member_plan").update({"visits_used": new_visits}).eq("mp_id", mp["mp_id"]).execute()
 
 def get_visits_df():
-    conn = get_conn(); df = pd.read_sql_query('SELECT v.*, m.membership_no as membership_no FROM visits v JOIN members m ON v.member_id = m.member_id ORDER BY v.visit_date DESC', conn); conn.close()
-    if 'membership_no' in df.columns: df['membership_no'] = df['membership_no'].astype(str)
-    return df
+    res = supabase.table("visits").select("*,member:members(membership_no)").order("visit_date", desc=True).execute()
+    rows = []
+    for r in (res.data or []):
+        row = r.copy()
+        if isinstance(row.get("member"), dict):
+            row["membership_no"] = row["member"].get("membership_no")
+            row.pop("member", None)
+        rows.append(row)
+    return df_from_res(rows)
 
-# placeholder for parent email — extend schema if you want to store parent email
-def get_parent_email_by_member_id(member_id):
-    return None
+# ---------- Invoices & Payments ----------
+def create_invoice(member_id, amount, description):
+    payload = {"member_id": member_id, "amount": amount, "description": description, "status": "unpaid", "invoice_date": datetime.now().date().isoformat()}
+    supabase.table("invoices").insert(payload).execute()
 
-# ---------- QR Code ----------
+def pay_invoice(invoice_id, amount_paid, method="offline", note=None):
+    supabase.table("payments").insert({"invoice_id": invoice_id, "amount_paid": amount_paid, "method": method, "paid_at": datetime.now().isoformat(), "note": note}).execute()
+    supabase.table("invoices").update({"status": "paid"}).eq("invoice_id", invoice_id).execute()
+
+def get_invoices_df():
+    inv = df_from_res(supabase.table("invoices").select("*").order("invoice_id", desc=True).execute())
+    members = df_from_res(supabase.table("members").select("member_id,membership_no").execute())
+    if not inv.empty:
+        inv = inv.merge(members, on="member_id", how="left")
+    return inv
+
+# ---------- QR & PDF helpers ----------
 def generate_qr_image(membership_no):
     qr = qrcode.QRCode(version=1, box_size=6, border=2)
     qr.add_data(membership_no)
     qr.make(fit=True)
-    return qr.make_image(fill_color='black', back_color='white')
+    return qr.make_image(fill_color="black", back_color="white")
 
-# ---------- PDF Certificate ----------
-def generate_certificate_pdf(member_id, membership_no):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute('SELECT parent_name, child_name FROM members WHERE member_id=?', (member_id,))
-    row = cur.fetchone(); conn.close()
-    parent_name = row[0] if row else ''
-    child_name = row[1] if row else ''
+def generate_invoice_pdf(invoice_row):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-    c.setFont('Helvetica-Bold', 24)
-    c.drawCentredString(width/2, height - 150, 'Certificate of Completion')
-    c.setFont('Helvetica', 16)
-    c.drawCentredString(width/2, height - 200, f'Presented to: {child_name}')
-    c.setFont('Helvetica', 12)
-    c.drawCentredString(width/2, height - 230, f'Parent: {parent_name}')
-    c.drawCentredString(width/2, height - 260, f'Membership No: {membership_no}')
-    c.drawCentredString(width/2, height - 290, f'Date: {datetime.now().date().isoformat()}')
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(80, height-80, "Invoice")
+    c.setFont("Helvetica", 12)
+    y = height - 120
+    for k, v in invoice_row.items():
+        c.drawString(80, y, f"{k}: {v}")
+        y -= 20
     c.showPage(); c.save(); buffer.seek(0)
     return buffer.getvalue()
 
-# ---------- Streamlit UI ----------
-init_db()
-st.set_page_config(page_title='Membership ERP', layout='wide')
-st.markdown("""<style>[data-testid='stSidebar']{background-color:#f0f2f6}h1{color:#0f4c81}</style>""", unsafe_allow_html=True)
-st.title('Membership ERP (Streamlit)')
+# ---------- UI ----------
+if "staff_user" not in st.session_state:
+    st.session_state.staff_user = None
 
-# session
-if 'user' not in st.session_state: st.session_state.user = None
+pages = ["Login","Dashboard","Members","Plans","Member Plans","Visits","Invoices","Reports","Export","Settings","OptionD"]
+page = st.sidebar.selectbox("Page", pages)
 
-menu = st.sidebar.selectbox('Go to', ['Home', 'Login', 'Members', 'Plans', 'Assign Plan', 'Record Visit', 'Reports', 'Export Data'])
+# LOGIN
+if page == "Login":
+    st.header("Staff Login")
+    email = st.text_input("Email")
+    pwd = st.text_input("Password", type="password")
+    if st.button("Login"):
+        ok, role, name = verify_staff(email, pwd)
+        if ok:
+            st.session_state.staff_user = {"email": email, "role": role, "name": name}
+            st.toast(f"Welcome {name}", icon="✔️")
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
 
-# --- Home ---
-if menu == 'Home':
-    st.markdown('### Quick actions')
-    st.markdown('- Login to manage the ERP')
+if page != "Login" and not st.session_state.staff_user:
+    st.warning("Please login (Login page)")
+    st.stop()
 
-# --- Login ---
-if menu == 'Login':
-    st.header('Login')
-    col1, col2 = st.columns(2)
-    with col1:
-        email = st.text_input('Email')
-        pwd = st.text_input('Password', type='password')
-        if st.button('Login'):
-            ok, role, name = verify_user(email, pwd)
-            if ok:
-                st.session_state.user = {'email': email, 'role': role, 'name': name}
-                st.success(f'Logged in as {name} ({role})')
-            else:
-                st.error('Invalid credentials')
-    with col2:
-        st.info('OTP login and user creation can be added here')
+# DASHBOARD
+if page == "Dashboard":
+    st.header("Dashboard")
+    members = get_members_df()
+    plans = get_plans_df()
+    visits = get_visits_df()
+    st.metric("Total Members", len(members))
+    st.metric("Total Plans", len(plans))
+    st.metric("Visits (last 30 days)", len(visits[visits["visit_date"] >= (datetime.now() - timedelta(days=30)).isoformat()]) if not visits.empty else 0)
+    if st.button("Create sample member"):
+        add_member("Parent Sample","9999999999","Child Sample", datetime.now().date().isoformat())
+        st.toast("Sample member added", icon="🎉")
+        st.rerun()
 
-# protected area
-if menu in ['Members', 'Plans', 'Assign Plan', 'Record Visit', 'Reports', 'Export Data'] and not st.session_state.get('user'):
-    st.error('Please login first via the Login page')
-
-# --- Members ---
-if menu == 'Members' and st.session_state.get('user'):
-    user = st.session_state.get('user')
-    st.sidebar.markdown(f"Logged in: **{user.get('name')}** ({user.get('email')})")
-    if st.sidebar.button('Logout'):
-        st.session_state.user = None
-        st.experimental_rerun()
-
-    st.subheader('➕ Add New Member')
-    with st.form('add_member'):
-        parent_name = st.text_input('Parent Name *')
-        phone = st.text_input('Phone Number *')
-        child_name = st.text_input('Child Name *')
-        child_dob = st.date_input('Child DOB')
-        submitted = st.form_submit_button('Add Member')
-        if submitted:
-            if not parent_name or not phone or not child_name:
-                st.error('Please fill required fields')
-            else:
-                membership_no = add_member(parent_name, phone, child_name, child_dob.isoformat())
-                st.toast("Saved successfully!", icon="✔️")
-
-                #---st.success(f'Member added: {membership_no}')---
-                img = generate_qr_image(membership_no)
-                buf = io.BytesIO(); img.save(buf, format='PNG')
-                st.image(Image.open(io.BytesIO(buf.getvalue())), width=150)
-                st.download_button('Download QR', data=buf.getvalue(), file_name=f'{membership_no}.png')
-
-    st.markdown('---')
-    st.subheader('👥 Existing Members')
+# MEMBERS
+if page == "Members":
+    st.header("Members")
+    with st.expander("Add Member"):
+        with st.form("add_member_form"):
+            parent = st.text_input("Parent name")
+            phone = st.text_input("Phone")
+            child = st.text_input("Child name")
+            dob = st.date_input("Child DOB")
+            parent_email = st.text_input("Parent email (optional)")
+            if st.form_submit_button("Add Member"):
+                mn = add_member(parent, phone, child, dob.isoformat(), parent_email or None)
+                st.toast(f"Member added: {mn}", icon="🎉")
+                st.rerun()
     df = get_members_df()
     if df.empty:
-        st.info('No members yet')
+        st.info("No members")
     else:
-        # selection by membership number
-        member_list = df['membership_no'].tolist()
-        sel = st.selectbox('Select member to view/edit', member_list)
-        if sel:
-            row = df[df['membership_no'] == sel].iloc[0]
-            col1, col2 = st.columns([2,1])
-            with col1:
-                parent_new = st.text_input('Parent Name', value=row['parent_name'], key='parent_edit')
-                phone_new = st.text_input('Phone Number', value=row['phone_number'], key='phone_edit')
-                child_new = st.text_input('Child Name', value=row['child_name'], key='child_edit')
-                dob_new = st.date_input('Child DOB', value=pd.to_datetime(row['child_dob']).date(), key='dob_edit')
-                if st.button('Update Member'):
-                    update_member(row['member_id'], parent_new, phone_new, child_new, dob_new.isoformat())
-                    st.toast("Saved successfully!", icon="✔️")
-                    #----st.success('Member updated')----
-                    st.rerun()
-            with col2:
-                st.write('Membership No:')
-                st.code(row['membership_no'])
-                if st.button('Delete Member'):
-                    delete_member(row['member_id'])
-                    st.success('Member deleted')
-                    st.experimental_rerun()
+        st.dataframe(df)
+        sel = st.selectbox("Select Membership No to edit", df["membership_no"].tolist())
+        row = df[df["membership_no"]==sel].iloc[0]
+        st.subheader("Edit selected member")
+        col1, col2 = st.columns([2,1])
+        with col1:
+            pnew = st.text_input("Parent", value=row["parent_name"], key="pe")
+            phone_new = st.text_input("Phone", value=row["phone_number"], key="phe")
+            child_new = st.text_input("Child", value=row["child_name"], key="ce")
+            try:
+                dobval = pd.to_datetime(row["child_dob"]).date()
+            except Exception:
+                dobval = datetime.now().date()
+            dob_new = st.date_input("DOB", value=dobval, key="de")
+            email_new = st.text_input("Parent email", value=row.get("parent_email",""), key="ee")
+            if st.button("Update Member"):
+                update_member(row["member_id"], pnew, phone_new, child_new, dob_new.isoformat(), email_new or None)
+                st.toast("Member updated", icon="✔️")
+                st.rerun()
+        with col2:
+            if st.button("Delete Member"):
+                delete_member(row["member_id"])
+                st.toast("Member deleted", icon="🗑️")
+                st.rerun()
 
-# --- Plans ---
-if menu == 'Plans' and st.session_state.get('user'):
-    st.subheader('Manage Plans')
-    with st.form('add_plan'):
-        plan_type = st.text_input('Plan Type')
-        entitled_visits = st.number_input('No. of Visits Entitled', min_value=1, value=10)
-        per_visit_hours = st.number_input('Hours per Visit', min_value=1, value=1)
-        price = st.number_input('Price', min_value=0.0, value=0.0)
-        validity_days = st.number_input('Validity (days)', min_value=1, value=30)
-        if st.form_submit_button('Add Plan'):
-            add_plan(plan_type, int(entitled_visits), int(per_visit_hours), float(price), int(validity_days))
-            st.toast("Saved successfully!", icon="✔️")
-            #----st.success('Plan added')---
-    st.markdown('---')
-    st.subheader('Existing Plans')
+# PLANS
+if page == "Plans":
+    st.header("Plans")
+    with st.form("add_plan_form"):
+        plan_name = st.text_input("Plan name")
+        price = st.number_input("Price", min_value=0.0, value=0.0)
+        duration = st.number_input("Duration days", min_value=1, value=30)
+        if st.form_submit_button("Add Plan"):
+            add_plan(plan_name, price, int(duration))
+            st.toast("Plan added", icon="✔️")
+            st.rerun()
     st.dataframe(get_plans_df())
 
-# --- Assign Plan ---
-if menu == 'Assign Plan' and st.session_state.get('user'):
-    st.subheader('Assign Plan to Member')
-    members_df = get_members_df(); plans_df = get_plans_df()
-    if members_df.empty or plans_df.empty:
-        st.info('Add members and plans first')
+# MEMBER PLANS
+if page == "Member Plans":
+    st.header("Assign / View Member Plans")
+    members = get_members_df()
+    plans = get_plans_df()
+    if members.empty or plans.empty:
+        st.info("Add members and plans first")
     else:
-        mem = st.selectbox('Select Member', members_df['membership_no'].tolist())
-        plan_opt = plans_df.apply(lambda r: f"{r['plan_id']} - {r['plan_type']} (Visits: {r['entitled_visits']})", axis=1).tolist()
-        plan_sel = st.selectbox('Select Plan', plan_opt)
-        start_date = st.date_input('Start Date', value=datetime.now().date())
-        if st.button('Assign Plan'):
-            plan_id = int(plan_sel.split(' - ')[0])
-            member_row = members_df[members_df['membership_no'] == mem].iloc[0]
-            assign_plan_to_member(member_row['member_id'], plan_id, start_date.isoformat())
-            st.toast("Saved successfully!", icon="✔️")
-            #----st.success('Plan assigned')----
-
-# --- Record Visit ---
-if menu == 'Record Visit' and st.session_state.get('user'):
-    st.subheader('Record Visit / Check-in')
-    members_df = get_members_df()
-    if members_df.empty:
-        st.info('Add members first')
-    else:
-        mem = st.selectbox('Select Member for Visit', members_df['membership_no'].tolist())
-        hours_used = st.number_input('Hours Used', min_value=1, value=1)
-        notes = st.text_input('Notes (optional)')
-        if st.button('Record Visit'):
-            member_row = members_df[members_df['membership_no'] == mem].iloc[0]
-            record_visit(member_row['member_id'], int(hours_used), notes)
-            st.toast("Saved successfully!", icon="✔️")
-            #----st.success('Visit recorded')---
-
-# --- Reports ---
-if menu == 'Reports' and st.session_state.get('user'):
-    st.subheader('Member Plans')
+        msel = st.selectbox("Select member", members["membership_no"].tolist())
+        psel = st.selectbox("Select plan", plans["plan_name"].tolist())
+        start_date = st.date_input("Start date", value=datetime.now().date())
+        if st.button("Assign Plan"):
+            member_row = members[members["membership_no"]==msel].iloc[0]
+            plan_row = plans[plans["plan_name"]==psel].iloc[0]
+            assign_plan(member_row["member_id"], plan_row["plan_id"], start_date.isoformat())
+            st.toast("Plan assigned", icon="📘")
+            st.rerun()
+    st.subheader("All Member Plans")
     st.dataframe(get_member_plans_df())
-    st.subheader('Visits')
+
+# VISITS
+if page == "Visits":
+    st.header("Record Visit")
+    members = get_members_df()
+    if members.empty:
+        st.info("Add members first")
+    else:
+        msel = st.selectbox("Select member", members["membership_no"].tolist())
+        hours = st.number_input("Hours used", min_value=1, value=1)
+        notes = st.text_input("Notes")
+        if st.button("Record Visit"):
+            member_row = members[members["membership_no"]==msel].iloc[0]
+            record_visit(member_row["member_id"], int(hours), notes)
+            st.toast("Visit recorded", icon="⏱️")
+            st.rerun()
+    st.subheader("Recent Visits")
     st.dataframe(get_visits_df())
 
-# --- Export Data ---
-if menu == 'Export Data' and st.session_state.get('user'):
-    st.header('Export Data')
-    if st.button('Export all to Excel'):
-        conn = get_conn()
-        members = pd.read_sql_query('SELECT * FROM members', conn)
-        plans = pd.read_sql_query('SELECT * FROM plans', conn)
-        member_plan = pd.read_sql_query('SELECT mp.*, m.membership_no FROM member_plan mp JOIN members m ON mp.member_id = m.member_id', conn)
-        visits = pd.read_sql_query('SELECT v.*, m.membership_no FROM visits v JOIN members m ON v.member_id = m.member_id', conn)
-        conn.close()
-        # Ensure membership_no is string to avoid Excel formatting issues
-        if 'membership_no' in member_plan.columns: member_plan['membership_no'] = member_plan['membership_no'].astype(str)
-        if 'membership_no' in visits.columns: visits['membership_no'] = visits['membership_no'].astype(str)
-        with io.BytesIO() as buffer:
-            with pd.ExcelWriter(buffer) as writer:
-                members.to_excel(writer, sheet_name='members', index=False)
-                plans.to_excel(writer, sheet_name='plans', index=False)
-                member_plan.to_excel(writer, sheet_name='member_plan', index=False)
-                visits.to_excel(writer, sheet_name='visits', index=False)
-            st.download_button('Download Excel', data=buffer.getvalue(), file_name='membership_export.xlsx')
+# INVOICES
+if page == "Invoices":
+    st.header("Invoices & Payments")
+    members = get_members_df()
+    if members.empty:
+        st.info("Add members first")
+    else:
+        msel = st.selectbox("Select member for invoice", members["membership_no"].tolist())
+        amount = st.number_input("Amount", min_value=0.0, value=0.0)
+        desc = st.text_input("Description")
+        if st.button("Create Invoice"):
+            mr = members[members["membership_no"]==msel].iloc[0]
+            create_invoice(mr["member_id"], float(amount), desc)
+            st.toast("Invoice created", icon="🧾")
+            st.rerun()
+    st.subheader("All Invoices")
+    st.dataframe(get_invoices_df())
+    invsel = st.text_input("Enter invoice_id to mark paid")
+    if st.button("Mark Paid"):
+        if invsel.strip():
+            pay_invoice(int(invsel.strip()), 0.0, method="offline", note="Marked paid by staff")
+            st.toast("Invoice paid", icon="💰")
+            st.rerun()
 
-# End of file
+# REPORTS
+if page == "Reports":
+    st.header("Reports Dashboard")
+    st.subheader("Members")
+    st.dataframe(get_members_df())
+    st.subheader("Member Plans")
+    st.dataframe(get_member_plans_df())
+    st.subheader("Visits")
+    st.dataframe(get_visits_df())
+    st.subheader("Invoices")
+    st.dataframe(get_invoices_df())
+
+# EXPORT
+if page == "Export":
+    st.header("Export Data")
+    if st.button("Export all to Excel"):
+        members = get_members_df()
+        plans = get_plans_df()
+        mp = get_member_plans_df()
+        visits = get_visits_df()
+        invoices = get_invoices_df()
+        for df in (members, mp, visits, invoices):
+            if "membership_no" in df.columns:
+                df["membership_no"] = df["membership_no"].astype(str).apply(lambda x: "'" + x)
+        with io.BytesIO() as buffer:
+            with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                members.to_excel(writer, sheet_name="members", index=False)
+                plans.to_excel(writer, sheet_name="plans", index=False)
+                mp.to_excel(writer, sheet_name="member_plan", index=False)
+                visits.to_excel(writer, sheet_name="visits", index=False)
+                invoices.to_excel(writer, sheet_name="invoices", index=False)
+            st.download_button("Download Excel", data=buffer.getvalue(), file_name="membership_export.xlsx")
+
+# SETTINGS
+if page == "Settings":
+    st.header("Settings & Notes")
+    st.info("Supabase SERVICE_ROLE key is used for admin operations. For production, consider RLS and using anon keys plus server functions.")
+    st.markdown("Notifications and email sending can be integrated here (SMTP).")
+
+# OPTION D - Admin creation & quick test helpers
+if page == "OptionD":
+    st.header("Option D — Create Admin & Test")
+    st.markdown("Use this page to create an admin user and run quick tests.")
+    with st.expander("Create Admin User"):
+        email = st.text_input("Admin email", key="adm_email")
+        name = st.text_input("Admin name", key="adm_name")
+        pwd = st.text_input("Admin password", type="password", key="adm_pwd")
+        if st.button("Create Admin"):
+            ok, msg = create_staff_user(email, name, pwd, role="admin")
+            if ok:
+                st.toast("Admin created", icon="✔️")
+            else:
+                st.error(msg)
+    st.markdown("---")
+    st.markdown("### Quick tests")
+    if st.button("Add sample member"):
+        mn = add_member("Test Parent","9999999999","Test Child", datetime.now().date().isoformat())
+        st.toast(f"Added {mn}", icon="🎉")
+    if st.button("Run all-read test"):
+        try:
+            _ = get_members_df()
+            _ = get_plans_df()
+            _ = get_member_plans_df()
+            _ = get_visits_df()
+            _ = get_invoices_df()
+            st.success("Read tests OK")
+        except Exception as e:
+            st.error(f"Read tests failed: {e}")
