@@ -1,6 +1,7 @@
 streamlit
-streamlit-aggrid
+supabase
 pandas
 qrcode
 Pillow
 reportlab
+xlsxwriter
