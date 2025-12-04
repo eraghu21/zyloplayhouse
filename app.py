@@ -11,8 +11,8 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 
 # ----------------- CONFIG -----------------
-SUPABASE_URL = "your_supabase_url"
-SUPABASE_SERVICE_ROLE_KEY = "your_service_role_key"
+SUPABASE_URL = 'your_supabase_url'
+SUPABASE_SERVICE_ROLE_KEY = 'your_service_role_key'
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # ----------------- HELPERS -----------------
